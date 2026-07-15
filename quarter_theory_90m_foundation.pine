@@ -23,53 +23,32 @@ extend_lines = input.bool(true, "Extend Lines Right")
 // CORE LOGIC - NY TIME & 90M CYCLE CALCULATION
 // ============================================================================
 
-// Get current time in NY timezone (EST = UTC-5, EDT = UTC-4)
-// For simplicity, we'll use the chart's bar time and assume NY timezone
-// In production, you'd need to convert properly based on DST
-
-f_get_ny_time() =>
-    // Returns time in milliseconds (NY time assumed from chart)
-    time
-
 f_get_minutes_since_midnight() =>
-    // Get hour and minute of current bar
     bar_hour = hour(time)
     bar_minute = minute(time)
-    
-    // Minutes since midnight
     minutes_since_midnight = bar_hour * 60 + bar_minute
     minutes_since_midnight
 
 f_get_90m_quarter_number() =>
-    // Which 90-minute quarter are we in?
-    // Quarter 1: 0:00 - 1:29 (minutes 0-89)
-    // Quarter 2: 1:30 - 2:59 (minutes 90-179)
-    // Quarter 3: 3:00 - 4:29 (minutes 180-269)
-    // etc.
-    
     minutes = f_get_minutes_since_midnight()
     quarter = math.floor(minutes / 90)
     quarter
 
 f_get_90m_cycle_id() =>
-    // Unique ID: YYYYMMDD + quarter number
     cycle_date = year(time) * 10000 + month(time) * 100 + dayofmonth(time)
     quarter_num = f_get_90m_quarter_number()
     cycle_id = cycle_date * 100 + quarter_num
     cycle_id
 
 f_is_new_90m_quarter() =>
-    // Check if we just entered a new 90-minute quarter
     current_id = f_get_90m_cycle_id()
     previous_id = f_get_90m_cycle_id()[1]
-    
     current_id != previous_id
 
 // ============================================================================
 // QUARTER STATE TRACKING
 // ============================================================================
 
-// Store current and previous quarter data
 var int current_quarter_id = 0
 var float current_quarter_high = 0.0
 var float current_quarter_low = 0.0
@@ -78,24 +57,19 @@ var int previous_quarter_id = 0
 var float previous_quarter_high = 0.0
 var float previous_quarter_low = 0.0
 
-var array<line> active_lines = array.new<line>()
-
 // ============================================================================
 // MAIN LOGIC - UPDATE QUARTERS
 // ============================================================================
 
 if f_is_new_90m_quarter()
-    // Store current quarter as previous
     previous_quarter_id := current_quarter_id
     previous_quarter_high := current_quarter_high
     previous_quarter_low := current_quarter_low
     
-    // Start new current quarter
     current_quarter_id := f_get_90m_cycle_id()
     current_quarter_high := high
     current_quarter_low := low
 
-// Update current quarter high/low if we're still in same quarter
 if f_get_90m_cycle_id() == current_quarter_id
     current_quarter_high := math.max(current_quarter_high, high)
     current_quarter_low := math.min(current_quarter_low, low)
@@ -106,25 +80,23 @@ if f_get_90m_cycle_id() == current_quarter_id
 
 // Plot CURRENT quarter High and Low
 if show_current_quarter and current_quarter_id != 0
-    // Current High
     line.new(
         x1=bar_index - 90,
         y1=current_quarter_high,
         x2=bar_index,
         y2=current_quarter_high,
-        extend=extend_lines ? line.all : line.none,
+        extend=extend_lines ? line.right : line.both,
         color=current_q_color,
         width=line_width,
         style=line.style_solid
     )
     
-    // Current Low
     line.new(
         x1=bar_index - 90,
         y1=current_quarter_low,
         x2=bar_index,
         y2=current_quarter_low,
-        extend=extend_lines ? line.all : line.none,
+        extend=extend_lines ? line.right : line.both,
         color=current_q_color,
         width=line_width,
         style=line.style_solid
@@ -132,25 +104,23 @@ if show_current_quarter and current_quarter_id != 0
 
 // Plot PREVIOUS quarter High and Low
 if show_previous_quarter and previous_quarter_id != 0
-    // Previous High
     line.new(
         x1=bar_index - 180,
         y1=previous_quarter_high,
         x2=bar_index,
         y2=previous_quarter_high,
-        extend=extend_lines ? line.all : line.none,
+        extend=extend_lines ? line.right : line.both,
         color=previous_q_color,
         width=line_width,
         style=line.style_dashed
     )
     
-    // Previous Low
     line.new(
         x1=bar_index - 180,
         y1=previous_quarter_low,
         x2=bar_index,
         y2=previous_quarter_low,
-        extend=extend_lines ? line.all : line.none,
+        extend=extend_lines ? line.right : line.both,
         color=previous_q_color,
         width=line_width,
         style=line.style_dashed
@@ -173,7 +143,6 @@ if barstate.islast
             border_width=1
         )
     
-    // Current time info
     bar_hour = hour(time)
     bar_minute = minute(time)
     minutes_in_day = f_get_minutes_since_midnight()
