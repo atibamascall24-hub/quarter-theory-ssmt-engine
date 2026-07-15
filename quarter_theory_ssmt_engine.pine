@@ -5,8 +5,6 @@ indicator("Quarter Theory + SSMT Institutional Engine v1.0", overlay=true, max_l
 // CORE FRAMEWORK - Phase 4.1
 // ============================================================================
 
-import time.new as time_new
-
 // Custom Types
 type CycleSnapshot
     int cycle_id
@@ -89,13 +87,13 @@ f_get_ny_time() =>
 f_is_sunday_1800_ny() =>
     ny_time = f_get_ny_time()
     day_of_week = dayofweek(ny_time)
-    hour = hour(ny_time)
-    (day_of_week == dayofweek.sunday and hour == 18)
+    hour_val = hour(ny_time)
+    (day_of_week == dayofweek.sunday and hour_val == 18)
 
 f_is_daily_1800_ny() =>
     ny_time = f_get_ny_time()
-    hour = hour(ny_time)
-    (hour == 18)
+    hour_val = hour(ny_time)
+    (hour_val == 18)
 
 f_get_weekly_cycle_id() =>
     // Unique ID based on year + week
@@ -389,9 +387,6 @@ f_get_last_ssmt() =>
 
 f_get_bias_alignment() =>
     // Returns alignment score: how many timeframes agree
-    daily_weight = 1
-    cycle_90m_weight = 2  // 90m has more weight
-    
     alignment = ""
     
     // Check if daily and 90m align
