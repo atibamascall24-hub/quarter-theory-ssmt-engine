@@ -107,12 +107,11 @@ if f_get_90m_cycle_id() == current_quarter_id
 // Plot CURRENT quarter High and Low
 if show_current_quarter and current_quarter_id != 0
     // Current High
-    line_high_current = line.new(
+    line.new(
         x1=bar_index - 90,
         y1=current_quarter_high,
         x2=bar_index,
         y2=current_quarter_high,
-        closed=false,
         extend=extend_lines ? line.all : line.none,
         color=current_q_color,
         width=line_width,
@@ -120,12 +119,11 @@ if show_current_quarter and current_quarter_id != 0
     )
     
     // Current Low
-    line_low_current = line.new(
+    line.new(
         x1=bar_index - 90,
         y1=current_quarter_low,
         x2=bar_index,
         y2=current_quarter_low,
-        closed=false,
         extend=extend_lines ? line.all : line.none,
         color=current_q_color,
         width=line_width,
@@ -135,12 +133,11 @@ if show_current_quarter and current_quarter_id != 0
 // Plot PREVIOUS quarter High and Low
 if show_previous_quarter and previous_quarter_id != 0
     // Previous High
-    line_high_previous = line.new(
+    line.new(
         x1=bar_index - 180,
         y1=previous_quarter_high,
         x2=bar_index,
         y2=previous_quarter_high,
-        closed=false,
         extend=extend_lines ? line.all : line.none,
         color=previous_q_color,
         width=line_width,
@@ -148,12 +145,11 @@ if show_previous_quarter and previous_quarter_id != 0
     )
     
     // Previous Low
-    line_low_previous = line.new(
+    line.new(
         x1=bar_index - 180,
         y1=previous_quarter_low,
         x2=bar_index,
         y2=previous_quarter_low,
-        closed=false,
         extend=extend_lines ? line.all : line.none,
         color=previous_q_color,
         width=line_width,
