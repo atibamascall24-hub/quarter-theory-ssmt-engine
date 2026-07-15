@@ -1,0 +1,302 @@
+//@version=6
+indicator("Quarter Theory - 90M Quarter Objects (Phase 2)", overlay=true, max_lines_count=500, max_boxes_count=500)
+
+// ============================================================================
+// QUARTER THEORY - 90 MINUTE QUARTER OBJECTS
+// Phase 2: Complete & Immutable Quarter Data Model
+// Architecture: ActiveQuarter (live) + QuarterObject (immutable history)
+// New York Timezone (18:00 NY anchor)
+// No Repainting
+// ============================================================================
+
+// ============================================================================
+// TYPE DEFINITIONS
+// ============================================================================
+
+// ActiveQuarter: Updates every bar, current quarter being built
+type ActiveQuarter
+    int quarterNumber
+    int startBar
+    float open
+    float high
+    float low
+
+// QuarterObject: Immutable, locked when quarter closes
+type QuarterObject
+    int id
+    int quarterNumber
+    int startBar
+    int endBar
+    float open
+    float high
+    float low
+    float close
+    float midpoint
+    float range
+    string direction
+    bool completed
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+
+show_current_quarter = input.bool(true, "Show Current Active Quarter")
+show_previous_quarters = input.int(1, "Previous Completed Quarters", minval=1, maxval=20)
+current_q_color = input.color(color.new(color.blue, 70), "Current Quarter Color")
+previous_q_color = input.color(color.new(color.orange, 70), "Previous Quarter Color")
+line_width = input.int(2, "Line Width", minval=1, maxval=5)
+max_history_size = input.int(500, "Max History Size", minval=50, maxval=2000)
+
+// ============================================================================
+// GLOBAL STATE
+// ============================================================================
+
+var ActiveQuarter activeQuarter = na
+var array<QuarterObject> quarterHistory = array.new<QuarterObject>()
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+f_get_minutes_since_midnight() =>
+    // Calculate minutes since midnight NY time
+    bar_hour = hour(time)
+    bar_minute = minute(time)
+    (bar_hour * 60) + bar_minute
+
+f_get_90m_quarter_number() =>
+    // 0-15: 16 quarters in 24 hours, anchored to 18:00 NY
+    // Q0: 18:00-19:29, Q1: 19:30-21:00, Q2: 21:00-22:29, Q3: 22:30-00:00
+    // Q4: 00:00-01:29, ..., Q15: 16:30-18:00
+    minutes = f_get_minutes_since_midnight()
+    math.floor(minutes / 90)
+
+f_get_quarter_id() =>
+    // Unique ID: YYYYMMDD + quarter number (0-15)
+    cycle_date = year(time) * 10000 + month(time) * 100 + dayofmonth(time)
+    qtr_num = f_get_90m_quarter_number()
+    (cycle_date * 100) + qtr_num
+
+f_is_new_quarter() =>
+    // Check if we've entered a new 90-minute quarter
+    current_qtr = f_get_90m_quarter_number()
+    previous_qtr = f_get_90m_quarter_number()[1]
+    current_qtr != previous_qtr
+
+f_calculate_direction(open_price, close_price) =>
+    // Deterministic direction: Bull > Bear < Neutral ==
+    if close_price > open_price
+        "Bull"
+    else if close_price < open_price
+        "Bear"
+    else
+        "Neutral"
+
+f_create_quarter_object(id, qtr_num, start_bar, end_bar, open_p, high_p, low_p, close_p) =>
+    // Create an immutable QuarterObject when quarter closes
+    q = QuarterObject.new()
+    q.id := id
+    q.quarterNumber := qtr_num
+    q.startBar := start_bar
+    q.endBar := end_bar
+    q.open := open_p
+    q.high := high_p
+    q.low := low_p
+    q.close := close_p
+    q.midpoint := (high_p + low_p) / 2.0
+    q.range := high_p - low_p
+    q.direction := f_calculate_direction(open_p, close_p)
+    q.completed := true
+    q
+
+f_init_active_quarter(qtr_num, bar) =>
+    // Initialize a new ActiveQuarter
+    aq = ActiveQuarter.new()
+    aq.quarterNumber := qtr_num
+    aq.startBar := bar
+    aq.open := open
+    aq.high := high
+    aq.low := low
+    aq
+
+// ============================================================================
+// MAIN LOGIC - ACTIVE QUARTER MANAGEMENT
+// ============================================================================
+
+// Initialize on first bar
+if na(activeQuarter)
+    activeQuarter := f_init_active_quarter(f_get_90m_quarter_number(), bar_index)
+
+// On new quarter: Archive active quarter, start new one
+if f_is_new_quarter()
+    // Complete and lock the active quarter
+    if not na(activeQuarter)
+        completed_q = f_create_quarter_object(
+            f_get_quarter_id()[1],
+            activeQuarter.quarterNumber,
+            activeQuarter.startBar,
+            bar_index - 1,
+            activeQuarter.open,
+            activeQuarter.high,
+            activeQuarter.low,
+            close[1]
+        )
+        array.push(quarterHistory, completed_q)
+        
+        // Enforce max history size (FIFO)
+        if array.size(quarterHistory) > max_history_size
+            array.shift(quarterHistory)
+    
+    // Initialize new active quarter
+    activeQuarter := f_init_active_quarter(f_get_90m_quarter_number(), bar_index)
+
+// Update active quarter high/low (still live)
+if not na(activeQuarter) and f_get_90m_quarter_number() == activeQuarter.quarterNumber
+    activeQuarter.high := math.max(activeQuarter.high, high)
+    activeQuarter.low := math.min(activeQuarter.low, low)
+
+// ============================================================================
+// VISUALIZATION - PLOT QUARTERS
+// ============================================================================
+
+// Plot current ACTIVE quarter
+if show_current_quarter and not na(activeQuarter)
+    line.new(bar_index - 90, activeQuarter.high, bar_index, activeQuarter.high, color=current_q_color, width=line_width, style=line.style_solid)
+    line.new(bar_index - 90, activeQuarter.low, bar_index, activeQuarter.low, color=current_q_color, width=line_width, style=line.style_solid)
+
+// Plot PREVIOUS COMPLETED quarters (immutable)
+if array.size(quarterHistory) > 0
+    for i = 0 to math.min(show_previous_quarters - 1, array.size(quarterHistory) - 1)
+        idx = array.size(quarterHistory) - 1 - i
+        prev_qtr = array.get(quarterHistory, idx)
+        
+        line.new(bar_index - 180, prev_qtr.high, bar_index, prev_qtr.high, color=previous_q_color, width=line_width, style=line.style_dashed)
+        line.new(bar_index - 180, prev_qtr.low, bar_index, prev_qtr.low, color=previous_q_color, width=line_width, style=line.style_dashed)
+
+// ============================================================================
+// QUERY FUNCTIONS - Answer questions about quarters
+// ============================================================================
+
+f_get_quarter_by_number(qtr_number) =>
+    // Find a quarter by its quarter number (0-15)
+    result = na(QuarterObject)
+    if array.size(quarterHistory) > 0
+        for i = 0 to array.size(quarterHistory) - 1
+            q = array.get(quarterHistory, i)
+            if q.quarterNumber == qtr_number
+                result := q
+                break
+    result
+
+f_get_last_completed_quarter() =>
+    // Get the most recent completed quarter
+    if array.size(quarterHistory) > 0
+        array.get(quarterHistory, array.size(quarterHistory) - 1)
+    else
+        na(QuarterObject)
+
+f_get_last_n_quarters(n) =>
+    // Get the last N completed quarters (returns size)
+    math.min(n, array.size(quarterHistory))
+
+// ============================================================================
+// DIAGNOSTICS TABLE
+// ============================================================================
+
+var table diag_table = na
+
+if barstate.islast
+    if na(diag_table)
+        diag_table := table.new(
+            position=position.top_left,
+            columns=2,
+            rows=22,
+            bgcolor=color.new(color.black, 80),
+            border_color=color.gray,
+            border_width=1
+        )
+    
+    bar_hour = hour(time)
+    bar_minute = minute(time)
+    minutes_in_day = f_get_minutes_since_midnight()
+    
+    time_str = str.tostring(bar_hour) + ":" + (bar_minute < 10 ? "0" : "") + str.tostring(bar_minute)
+    
+    // Header
+    table.cell(diag_table, 0, 0, "═══ QUARTER THEORY ENGINE ═══", text_color=color.white, bgcolor=color.new(color.black, 80))
+    table.cell(diag_table, 1, 0, "", text_color=color.white)
+    
+    table.cell(diag_table, 0, 1, "TIME (NY)", text_color=color.white, bgcolor=color.new(color.black, 80))
+    table.cell(diag_table, 1, 1, time_str, text_color=color.white)
+    
+    table.cell(diag_table, 0, 2, "MINUTES IN DAY", text_color=color.white, bgcolor=color.new(color.black, 80))
+    table.cell(diag_table, 1, 2, str.tostring(minutes_in_day), text_color=color.white)
+    
+    table.cell(diag_table, 0, 3, "HISTORY SIZE", text_color=color.white, bgcolor=color.new(color.black, 80))
+    table.cell(diag_table, 1, 3, str.tostring(array.size(quarterHistory)) + "/" + str.tostring(max_history_size), text_color=color.white)
+    
+    // ACTIVE QUARTER
+    table.cell(diag_table, 0, 4, "─ ACTIVE QUARTER ─", text_color=color.white, bgcolor=color.new(color.black, 80))
+    table.cell(diag_table, 1, 4, "", text_color=color.white)
+    
+    if not na(activeQuarter)
+        table.cell(diag_table, 0, 5, "QUARTER #", text_color=color.white, bgcolor=color.new(color.black, 80))
+        table.cell(diag_table, 1, 5, str.tostring(activeQuarter.quarterNumber), text_color=color.cyan)
+        
+        table.cell(diag_table, 0, 6, "OPEN", text_color=color.white, bgcolor=color.new(color.black, 80))
+        table.cell(diag_table, 1, 6, str.tostring(math.round(activeQuarter.open, 2)), text_color=color.lime)
+        
+        table.cell(diag_table, 0, 7, "HIGH", text_color=color.white, bgcolor=color.new(color.black, 80))
+        table.cell(diag_table, 1, 7, str.tostring(math.round(activeQuarter.high, 2)), text_color=color.lime)
+        
+        table.cell(diag_table, 0, 8, "LOW", text_color=color.white, bgcolor=color.new(color.black, 80))
+        table.cell(diag_table, 1, 8, str.tostring(math.round(activeQuarter.low, 2)), text_color=color.lime)
+        
+        mid_active = (activeQuarter.high + activeQuarter.low) / 2.0
+        table.cell(diag_table, 0, 9, "MIDPOINT", text_color=color.white, bgcolor=color.new(color.black, 80))
+        table.cell(diag_table, 1, 9, str.tostring(math.round(mid_active, 2)), text_color=color.lime)
+        
+        range_active = activeQuarter.high - activeQuarter.low
+        table.cell(diag_table, 0, 10, "RANGE", text_color=color.white, bgcolor=color.new(color.black, 80))
+        table.cell(diag_table, 1, 10, str.tostring(math.round(range_active, 2)), text_color=color.lime)
+    
+    // PREVIOUS COMPLETED QUARTER
+    table.cell(diag_table, 0, 11, "─ LAST COMPLETED ─", text_color=color.white, bgcolor=color.new(color.black, 80))
+    table.cell(diag_table, 1, 11, "", text_color=color.white)
+    
+    last_q = f_get_last_completed_quarter()
+    if not na(last_q)
+        table.cell(diag_table, 0, 12, "QUARTER #", text_color=color.white, bgcolor=color.new(color.black, 80))
+        table.cell(diag_table, 1, 12, str.tostring(last_q.quarterNumber), text_color=color.orange)
+        
+        table.cell(diag_table, 0, 13, "OPEN", text_color=color.white, bgcolor=color.new(color.black, 80))
+        table.cell(diag_table, 1, 13, str.tostring(math.round(last_q.open, 2)), text_color=color.orange)
+        
+        table.cell(diag_table, 0, 14, "HIGH", text_color=color.white, bgcolor=color.new(color.black, 80))
+        table.cell(diag_table, 1, 14, str.tostring(math.round(last_q.high, 2)), text_color=color.orange)
+        
+        table.cell(diag_table, 0, 15, "LOW", text_color=color.white, bgcolor=color.new(color.black, 80))
+        table.cell(diag_table, 1, 15, str.tostring(math.round(last_q.low, 2)), text_color=color.orange)
+        
+        table.cell(diag_table, 0, 16, "CLOSE", text_color=color.white, bgcolor=color.new(color.black, 80))
+        table.cell(diag_table, 1, 16, str.tostring(math.round(last_q.close, 2)), text_color=color.orange)
+        
+        table.cell(diag_table, 0, 17, "MIDPOINT", text_color=color.white, bgcolor=color.new(color.black, 80))
+        table.cell(diag_table, 1, 17, str.tostring(math.round(last_q.midpoint, 2)), text_color=color.orange)
+        
+        table.cell(diag_table, 0, 18, "RANGE", text_color=color.white, bgcolor=color.new(color.black, 80))
+        table.cell(diag_table, 1, 18, str.tostring(math.round(last_q.range, 2)), text_color=color.orange)
+        
+        table.cell(diag_table, 0, 19, "DIRECTION", text_color=color.white, bgcolor=color.new(color.black, 80))
+        dir_color = last_q.direction == "Bull" ? color.green : last_q.direction == "Bear" ? color.red : color.gray
+        table.cell(diag_table, 1, 19, last_q.direction, text_color=dir_color)
+        
+        table.cell(diag_table, 0, 20, "COMPLETED", text_color=color.white, bgcolor=color.new(color.black, 80))
+        table.cell(diag_table, 1, 20, last_q.completed ? "YES" : "NO", text_color=color.yellow)
+    else
+        table.cell(diag_table, 0, 12, "NO COMPLETED QUARTERS", text_color=color.white, bgcolor=color.new(color.black, 80))
+        table.cell(diag_table, 1, 12, "", text_color=color.white)
+    
+    // STATUS
+    table.cell(diag_table, 0, 21, "STATUS", text_color=color.white, bgcolor=color.new(color.black, 80))
+    table.cell(diag_table, 1, 21, "TRACKING", text_color=color.green)
