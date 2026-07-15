@@ -1,0 +1,599 @@
+//@version=6
+indicator("Quarter Theory + SSMT Institutional Engine v1.0", overlay=true, max_lines_count=500, max_boxes_count=500)
+
+// ============================================================================
+// CORE FRAMEWORK - Phase 4.1
+// ============================================================================
+
+import time.new as time_new
+
+// Custom Types
+type CycleSnapshot
+    int cycle_id
+    string cycle_type  // "WEEKLY", "DAILY", "90M", "MICRO"
+    float open
+    float high
+    float low
+    float close
+    string bias  // "BULL", "BEAR", "NEUTRAL"
+    int timestamp
+    bool confirmed
+
+type LiquidityEvent
+    float price
+    string type  // "HIGH", "LOW", "INTERNAL", "SWEEP"
+    int timestamp
+    bool swept
+    float sweep_reaction_price
+
+type StructurePoint
+    float price
+    string type  // "SWING_HIGH", "SWING_LOW", "MSS", "BOS"
+    int timestamp
+    bool confirmed
+
+type SSMTSignal
+    bool divergence_detected
+    string divergence_type  // "BULLISH", "BEARISH"
+    float price
+    int timestamp
+    bool confirmed
+
+type TradeSignal
+    string trade_id
+    string symbol
+    string direction  // "LONG", "SHORT"
+    float entry_price
+    float stop_loss
+    array<float> targets
+    string grade  // "A", "B", "C"
+    int weekly_cycle_id
+    int daily_cycle_id
+    int cycle_90m_id
+    int micro_cycle_id
+    string liquidity_reference
+    string ssmt_reference
+    string structure_reference
+    int timestamp
+    string status  // "PENDING", "ACTIVE", "CLOSED"
+
+// Global Buffers (Storage)
+var array<CycleSnapshot> weekly_history = array.new<CycleSnapshot>()
+var array<CycleSnapshot> daily_history = array.new<CycleSnapshot>()
+var array<CycleSnapshot> cycle_90m_history = array.new<CycleSnapshot>()
+var array<CycleSnapshot> micro_cycle_history = array.new<CycleSnapshot>()
+
+var array<LiquidityEvent> liquidity_buffer = array.new<LiquidityEvent>()
+var array<StructurePoint> structure_buffer = array.new<StructurePoint>()
+var array<SSMTSignal> ssmt_buffer = array.new<SSMTSignal>()
+var array<TradeSignal> trade_signals = array.new<TradeSignal>()
+
+// Diagnostics & State
+var bool is_new_bar = false
+var string last_processed_bar = ""
+var string current_weekly_bias = "NEUTRAL"
+var string current_daily_bias = "NEUTRAL"
+var string current_90m_bias = "NEUTRAL"
+
+// ============================================================================
+// PHASE 4.2 - QUARTER THEORY CYCLE ENGINE
+// ============================================================================
+
+f_get_ny_time() =>
+    // Convert to America/New_York timezone
+    time_current = timenow
+    ny_offset_ms = -5 * 60 * 60 * 1000  // EST
+    ny_time = time_current + ny_offset_ms
+    ny_time
+
+f_is_sunday_1800_ny() =>
+    ny_time = f_get_ny_time()
+    day_of_week = dayofweek(ny_time)
+    hour = hour(ny_time)
+    (day_of_week == dayofweek.sunday and hour == 18)
+
+f_is_daily_1800_ny() =>
+    ny_time = f_get_ny_time()
+    hour = hour(ny_time)
+    (hour == 18)
+
+f_get_weekly_cycle_id() =>
+    // Unique ID based on year + week
+    cy = year(f_get_ny_time())
+    cw = weekofyear(f_get_ny_time())
+    cy * 100 + cw
+
+f_get_daily_cycle_id() =>
+    // Unique ID based on year + day of year
+    cy = year(f_get_ny_time())
+    cd = dayofyear(f_get_ny_time())
+    cy * 1000 + cd
+
+f_get_90m_cycle_id() =>
+    // 90-minute segmentation
+    ny_time = f_get_ny_time()
+    cy = year(ny_time)
+    cd = dayofyear(ny_time)
+    ch = hour(ny_time)
+    cm = minute(ny_time)
+    
+    // Calculate which 90-minute block
+    total_minutes = ch * 60 + cm
+    block_number = math.floor(total_minutes / 90)
+    
+    cy * 100000 + cd * 1000 + block_number
+
+f_get_micro_cycle_id() =>
+    // 5-minute micro cycles
+    ny_time = f_get_ny_time()
+    cy = year(ny_time)
+    cd = dayofyear(ny_time)
+    ch = hour(ny_time)
+    cm = minute(ny_time)
+    
+    total_minutes = ch * 60 + cm
+    block_number = math.floor(total_minutes / 5)
+    
+    cy * 1000000 + cd * 10000 + block_number
+
+f_detect_cycle_bias(open_p, high_p, low_p, close_p) =>
+    // Simple bias detection: close relative to open
+    if close_p > open_p
+        "BULL"
+    else if close_p < open_p
+        "BEAR"
+    else
+        "NEUTRAL"
+
+f_update_weekly_cycle() =>
+    if f_is_sunday_1800_ny() or (array.size(weekly_history) == 0)
+        cycle_id = f_get_weekly_cycle_id()
+        
+        // Only create if new week
+        if array.size(weekly_history) == 0 or weekly_history.last().cycle_id != cycle_id
+            snap = CycleSnapshot.new()
+            snap.cycle_id = cycle_id
+            snap.cycle_type = "WEEKLY"
+            snap.open = open[1]
+            snap.high = high[1]
+            snap.low = low[1]
+            snap.close = close[1]
+            snap.bias = f_detect_cycle_bias(open[1], high[1], low[1], close[1])
+            snap.timestamp = time[1]
+            snap.confirmed = true
+            
+            array.push(weekly_history, snap)
+            
+            // Trim old entries (keep last 52)
+            if array.size(weekly_history) > 52
+                array.shift(weekly_history)
+            
+            current_weekly_bias := snap.bias
+
+f_update_daily_cycle() =>
+    if f_is_daily_1800_ny() or (array.size(daily_history) == 0)
+        cycle_id = f_get_daily_cycle_id()
+        
+        if array.size(daily_history) == 0 or daily_history.last().cycle_id != cycle_id
+            snap = CycleSnapshot.new()
+            snap.cycle_id = cycle_id
+            snap.cycle_type = "DAILY"
+            snap.open = open[1]
+            snap.high = high[1]
+            snap.low = low[1]
+            snap.close = close[1]
+            snap.bias = f_detect_cycle_bias(open[1], high[1], low[1], close[1])
+            snap.timestamp = time[1]
+            snap.confirmed = true
+            
+            array.push(daily_history, snap)
+            
+            if array.size(daily_history) > 365
+                array.shift(daily_history)
+            
+            current_daily_bias := snap.bias
+
+f_update_90m_cycle() =>
+    cycle_id = f_get_90m_cycle_id()
+    
+    if array.size(cycle_90m_history) == 0 or cycle_90m_history.last().cycle_id != cycle_id
+        snap = CycleSnapshot.new()
+        snap.cycle_id = cycle_id
+        snap.cycle_type = "90M"
+        snap.open = open
+        snap.high = high
+        snap.low = low
+        snap.close = close
+        snap.bias = f_detect_cycle_bias(open, high, low, close)
+        snap.timestamp = time
+        snap.confirmed = barstate.isconfirmed
+        
+        array.push(cycle_90m_history, snap)
+        
+        if array.size(cycle_90m_history) > 200
+            array.shift(cycle_90m_history)
+        
+        current_90m_bias := snap.bias
+
+f_update_micro_cycle() =>
+    cycle_id = f_get_micro_cycle_id()
+    
+    if array.size(micro_cycle_history) == 0 or micro_cycle_history.last().cycle_id != cycle_id
+        snap = CycleSnapshot.new()
+        snap.cycle_id = cycle_id
+        snap.cycle_type = "MICRO"
+        snap.open = open
+        snap.high = high
+        snap.low = low
+        snap.close = close
+        snap.bias = f_detect_cycle_bias(open, high, low, close)
+        snap.timestamp = time
+        snap.confirmed = barstate.isconfirmed
+        
+        array.push(micro_cycle_history, snap)
+        
+        if array.size(micro_cycle_history) > 500
+            array.shift(micro_cycle_history)
+
+// ============================================================================
+// PHASE 4.3 - MARKET STRUCTURE ENGINE
+// ============================================================================
+
+f_detect_swing_high(length) =>
+    // Swing high: high > length bars on both sides
+    if bar_index < length or bar_index > bar_index - length
+        false
+    else
+        is_high = high[0] > high[length]
+        for i = 1 to length - 1
+            is_high := is_high and high[0] > high[i]
+            if not is_high
+                break
+        is_high
+
+f_detect_swing_low(length) =>
+    // Swing low: low < length bars on both sides
+    if bar_index < length or bar_index > bar_index - length
+        false
+    else
+        is_low = low[0] < low[length]
+        for i = 1 to length - 1
+            is_low := is_low and low[0] < low[i]
+            if not is_low
+                break
+        is_low
+
+f_update_structure() =>
+    swing_length = 3
+    
+    // Detect swing highs
+    if f_detect_swing_high(swing_length)
+        sp = StructurePoint.new()
+        sp.price = high[0]
+        sp.type = "SWING_HIGH"
+        sp.timestamp = time[0]
+        sp.confirmed = barstate.isconfirmed
+        array.push(structure_buffer, sp)
+    
+    // Detect swing lows
+    if f_detect_swing_low(swing_length)
+        sp = StructurePoint.new()
+        sp.price = low[0]
+        sp.type = "SWING_LOW"
+        sp.timestamp = time[0]
+        sp.confirmed = barstate.isconfirmed
+        array.push(structure_buffer, sp)
+    
+    // Trim buffer
+    if array.size(structure_buffer) > 200
+        array.shift(structure_buffer)
+
+f_get_last_structure_high() =>
+    last_high = 0.0
+    for i = array.size(structure_buffer) - 1 to 0 by -1
+        if structure_buffer.get(i).type == "SWING_HIGH"
+            last_high := structure_buffer.get(i).price
+            break
+    last_high
+
+f_get_last_structure_low() =>
+    last_low = 0.0
+    for i = array.size(structure_buffer) - 1 to 0 by -1
+        if structure_buffer.get(i).type == "SWING_LOW"
+            last_low := structure_buffer.get(i).price
+            break
+    last_low
+
+// ============================================================================
+// PHASE 4.4 - LIQUIDITY ENGINE
+// ============================================================================
+
+f_detect_liquidity_sweep() =>
+    // Detect previous highs/lows broken
+    if array.size(structure_buffer) >= 2
+        last_high = f_get_last_structure_high()
+        last_low = f_get_last_structure_low()
+        
+        // Check if current low breaks below last low (bullish sweep)
+        if last_low > 0 and low[0] < last_low
+            liq = LiquidityEvent.new()
+            liq.price = last_low
+            liq.type = "SWEEP"
+            liq.timestamp = time[0]
+            liq.swept = true
+            liq.sweep_reaction_price = close[0]
+            array.push(liquidity_buffer, liq)
+        
+        // Check if current high breaks above last high (bearish sweep)
+        if last_high > 0 and high[0] > last_high
+            liq = LiquidityEvent.new()
+            liq.price = last_high
+            liq.type = "SWEEP"
+            liq.timestamp = time[0]
+            liq.swept = true
+            liq.sweep_reaction_price = close[0]
+            array.push(liquidity_buffer, liq)
+    
+    if array.size(liquidity_buffer) > 300
+        array.shift(liquidity_buffer)
+
+f_get_last_sweep() =>
+    last_sweep = na(LiquidityEvent)
+    for i = array.size(liquidity_buffer) - 1 to 0 by -1
+        if liquidity_buffer.get(i).type == "SWEEP"
+            last_sweep := liquidity_buffer.get(i)
+            break
+    last_sweep
+
+// ============================================================================
+// PHASE 4.5 - SSMT ENGINE (Simplified Divergence Detection)
+// ============================================================================
+
+f_detect_ssmt_divergence() =>
+    // Simplified: detect price divergence with volume
+    if bar_index > 20
+        // Check for bullish divergence: lower lows in price, higher lows in volume
+        if low[0] < low[1] and volume[0] > volume[1]
+            ssmt = SSMTSignal.new()
+            ssmt.divergence_detected = true
+            ssmt.divergence_type = "BULLISH"
+            ssmt.price = low[0]
+            ssmt.timestamp = time[0]
+            ssmt.confirmed = barstate.isconfirmed
+            array.push(ssmt_buffer, ssmt)
+        
+        // Check for bearish divergence: higher highs in price, lower highs in volume
+        if high[0] > high[1] and volume[0] < volume[1]
+            ssmt = SSMTSignal.new()
+            ssmt.divergence_detected = true
+            ssmt.divergence_type = "BEARISH"
+            ssmt.price = high[0]
+            ssmt.timestamp = time[0]
+            ssmt.confirmed = barstate.isconfirmed
+            array.push(ssmt_buffer, ssmt)
+    
+    if array.size(ssmt_buffer) > 150
+        array.shift(ssmt_buffer)
+
+f_get_last_ssmt() =>
+    last_ssmt = na(SSMTSignal)
+    for i = array.size(ssmt_buffer) - 1 to 0 by -1
+        if ssmt_buffer.get(i).confirmed
+            last_ssmt := ssmt_buffer.get(i)
+            break
+    last_ssmt
+
+// ============================================================================
+// PHASE 4.6 - BIAS ENGINE
+// ============================================================================
+
+f_get_bias_alignment() =>
+    // Returns alignment score: how many timeframes agree
+    daily_weight = 1
+    cycle_90m_weight = 2  // 90m has more weight
+    
+    alignment = ""
+    
+    // Check if daily and 90m align
+    if current_daily_bias == current_90m_bias
+        alignment := current_daily_bias + "_ALIGNED"
+    else
+        alignment := "CONFLICT"
+    
+    alignment
+
+// ============================================================================
+// PHASE 4.7 - ENTRY ENGINE
+// ============================================================================
+
+f_calculate_fvg() =>
+    // Fair Value Gap: gap between candles
+    // Bullish FVG: low[2] > high[0] (gap up)
+    // Bearish FVG: high[2] < low[0] (gap down)
+    
+    fvg_type = "NONE"
+    fvg_level = 0.0
+    
+    if bar_index >= 2
+        if low[2] > high[0]
+            fvg_type := "BULLISH"
+            fvg_level := (low[2] + high[0]) / 2
+        else if high[2] < low[0]
+            fvg_type := "BEARISH"
+            fvg_level := (high[2] + low[0]) / 2
+    
+    [fvg_type, fvg_level]
+
+f_generate_trade_signal() =>
+    // ENTRY SEQUENCE:
+    // 1. Cycle Context
+    // 2. Bias Alignment
+    // 3. Liquidity Sweep
+    // 4. SSMT Confirmation
+    // 5. Internal Structure Shift
+    // 6. Entry Trigger
+    
+    if array.size(cycle_90m_history) == 0 or array.size(structure_buffer) < 2 or array.size(liquidity_buffer) == 0
+        return
+    
+    bias_alignment = f_get_bias_alignment()
+    
+    if bias_alignment == "CONFLICT"
+        return  // No trade when bias conflicts
+    
+    last_sweep = f_get_last_sweep()
+    
+    if na(last_sweep)
+        return  // Need liquidity event
+    
+    last_ssmt = f_get_last_ssmt()
+    
+    // Check if SSMT confirms the sweep direction
+    if not na(last_ssmt) and last_ssmt.confirmed
+        [fvg_type, fvg_level] = f_calculate_fvg()
+        
+        // LONG: Bullish sweep + bullish SSMT + FVG
+        if current_daily_bias == "BULL" and current_90m_bias == "BULL"
+            if last_ssmt.divergence_type == "BULLISH" and fvg_type == "BULLISH"
+                
+                entry = fvg_level
+                stop = last_sweep.price - (syminfo.mintick * 10)
+                target1 = last_sweep.price + (entry - stop) * 2
+                target2 = last_sweep.price + (entry - stop) * 3
+                
+                trade = TradeSignal.new()
+                trade.trade_id = str.tostring(time)
+                trade.symbol = syminfo.tickerid
+                trade.direction = "LONG"
+                trade.entry_price = entry
+                trade.stop_loss = stop
+                trade.targets = array.from(target1, target2)
+                trade.grade = "A"
+                trade.weekly_cycle_id = f_get_weekly_cycle_id()
+                trade.daily_cycle_id = f_get_daily_cycle_id()
+                trade.cycle_90m_id = f_get_90m_cycle_id()
+                trade.micro_cycle_id = f_get_micro_cycle_id()
+                trade.liquidity_reference = str.tostring(last_sweep.price)
+                trade.ssmt_reference = last_ssmt.divergence_type
+                trade.structure_reference = str.tostring(fvg_level)
+                trade.timestamp = time[0]
+                trade.status = "PENDING"
+                
+                array.push(trade_signals, trade)
+        
+        // SHORT: Bearish sweep + bearish SSMT + FVG
+        if current_daily_bias == "BEAR" and current_90m_bias == "BEAR"
+            if last_ssmt.divergence_type == "BEARISH" and fvg_type == "BEARISH"
+                
+                entry = fvg_level
+                stop = last_sweep.price + (syminfo.mintick * 10)
+                target1 = last_sweep.price - (stop - entry) * 2
+                target2 = last_sweep.price - (stop - entry) * 3
+                
+                trade = TradeSignal.new()
+                trade.trade_id = str.tostring(time)
+                trade.symbol = syminfo.tickerid
+                trade.direction = "SHORT"
+                trade.entry_price = entry
+                trade.stop_loss = stop
+                trade.targets = array.from(target1, target2)
+                trade.grade = "A"
+                trade.weekly_cycle_id = f_get_weekly_cycle_id()
+                trade.daily_cycle_id = f_get_daily_cycle_id()
+                trade.cycle_90m_id = f_get_90m_cycle_id()
+                trade.micro_cycle_id = f_get_micro_cycle_id()
+                trade.liquidity_reference = str.tostring(last_sweep.price)
+                trade.ssmt_reference = last_ssmt.divergence_type
+                trade.structure_reference = str.tostring(fvg_level)
+                trade.timestamp = time[0]
+                trade.status = "PENDING"
+                
+                array.push(trade_signals, trade)
+    
+    // Trim signals
+    if array.size(trade_signals) > 50
+        array.shift(trade_signals)
+
+// ============================================================================
+// MAIN EXECUTION LOOP
+// ============================================================================
+
+// Update all engines every bar
+f_update_weekly_cycle()
+f_update_daily_cycle()
+f_update_90m_cycle()
+f_update_micro_cycle()
+f_update_structure()
+f_detect_liquidity_sweep()
+f_detect_ssmt_divergence()
+f_generate_trade_signal()
+
+// ============================================================================
+// VISUALIZATION
+// ============================================================================
+
+// Plot cycle bias
+plot_y = close + (high - low) * 2
+
+color_weekly = current_weekly_bias == "BULL" ? color.new(color.green, 80) : current_weekly_bias == "BEAR" ? color.new(color.red, 80) : color.new(color.gray, 80)
+plot(plot_y, title="Weekly Bias", color=color_weekly, linewidth=3, style=plot.style_line, display=display.none)
+
+// Plot last sweep level
+last_sweep = f_get_last_sweep()
+if not na(last_sweep)
+    line.new(bar_index - 50, last_sweep.price, bar_index, last_sweep.price, color=color.orange, width=2, style=line.style_dashed)
+
+// Plot SSMT divergence
+last_ssmt = f_get_last_ssmt()
+if not na(last_ssmt) and last_ssmt.confirmed
+    marker_color = last_ssmt.divergence_type == "BULLISH" ? color.lime : color.fuchsia
+    plot(last_ssmt.price, title="SSMT Signal", color=marker_color, style=plot.style_circles, linewidth=3)
+
+// Plot active trades
+if array.size(trade_signals) > 0
+    latest_trade = trade_signals.last()
+    if latest_trade.status == "PENDING"
+        // Entry level
+        line.new(bar_index - 20, latest_trade.entry_price, bar_index, latest_trade.entry_price, color=color.blue, width=2)
+        // Stop loss
+        line.new(bar_index - 20, latest_trade.stop_loss, bar_index, latest_trade.stop_loss, color=color.red, width=2, style=line.style_dotted)
+        // First target
+        line.new(bar_index - 20, latest_trade.targets.get(0), bar_index, latest_trade.targets.get(0), color=color.green, width=2, style=line.style_dashed)
+
+// ============================================================================
+// DIAGNOSTICS TABLE
+// ============================================================================
+
+var table diag_table = na
+
+if barstate.islast
+    if na(diag_table)
+        diag_table := table.new(position=position.top_right, columns=2, rows=8, bgcolor=color.new(color.black, 80), border_color=color.gray, border_width=1)
+        
+        table.cell(diag_table, 0, 0, "WEEKLY BIAS", text_color=color.white, bgcolor=color.new(color.black, 80))
+        table.cell(diag_table, 1, 0, current_weekly_bias, text_color=color.white)
+        
+        table.cell(diag_table, 0, 1, "DAILY BIAS", text_color=color.white, bgcolor=color.new(color.black, 80))
+        table.cell(diag_table, 1, 1, current_daily_bias, text_color=color.white)
+        
+        table.cell(diag_table, 0, 2, "90M BIAS", text_color=color.white, bgcolor=color.new(color.black, 80))
+        table.cell(diag_table, 1, 2, current_90m_bias, text_color=color.white)
+        
+        table.cell(diag_table, 0, 3, "ALIGNMENT", text_color=color.white, bgcolor=color.new(color.black, 80))
+        table.cell(diag_table, 1, 3, f_get_bias_alignment(), text_color=color.white)
+        
+        table.cell(diag_table, 0, 4, "SWEEPS", text_color=color.white, bgcolor=color.new(color.black, 80))
+        table.cell(diag_table, 1, 4, str.tostring(array.size(liquidity_buffer)), text_color=color.white)
+        
+        table.cell(diag_table, 0, 5, "SSMT SIGNALS", text_color=color.white, bgcolor=color.new(color.black, 80))
+        table.cell(diag_table, 1, 5, str.tostring(array.size(ssmt_buffer)), text_color=color.white)
+        
+        table.cell(diag_table, 0, 6, "TRADES PENDING", text_color=color.white, bgcolor=color.new(color.black, 80))
+        table.cell(diag_table, 1, 6, str.tostring(array.size(trade_signals)), text_color=color.white)
+        
+        table.cell(diag_table, 0, 7, "STATUS", text_color=color.white, bgcolor=color.new(color.black, 80))
+        if array.size(trade_signals) > 0
+            latest = trade_signals.last()
+            table.cell(diag_table, 1, 7, latest.status + " | " + latest.direction, text_color=color.white)
+        else
+            table.cell(diag_table, 1, 7, "AWAITING SETUP", text_color=color.white)
