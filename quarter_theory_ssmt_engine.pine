@@ -1,519 +1,211 @@
 //@version=6
-indicator("Quarter Theory + SSMT Institutional Engine v2.0", overlay=true, max_lines_count=500, max_boxes_count=500)
+indicator("Quarter Theory SSMT Engine v3", overlay=true, max_lines_count=500, max_boxes_count=500)
 
 // ============================================================================
-// CORE FRAMEWORK - Phase 4.1 - FIXED FOR PINE SCRIPT V6
+// SIMPLIFIED QUARTER THEORY + SSMT ENGINE - PINE SCRIPT V6 COMPLIANT
 // ============================================================================
 
-// Custom Types
-type CycleSnapshot
-    int cycle_id
-    string cycle_type
-    float open_price
-    float high_price
-    float low_price
-    float close_price
-    string bias
-    int timestamp_val
-    bool confirmed
-
-type LiquidityEvent
-    float price_val
-    string sweep_type
-    int timestamp_val
-    bool swept
-    float reaction_price
-
-type StructurePoint
-    float price_val
-    string point_type
-    int timestamp_val
-    bool confirmed
-
-type SSMTSignal
-    bool detected
-    string divergence_type
-    float price_val
-    int timestamp_val
-    bool confirmed
-
-type TradeSignal
-    string trade_id
-    string symbol
-    string direction
-    float entry_price
-    float stop_loss
-    array<float> targets
-    string grade
-    int weekly_id
-    int daily_id
-    int cycle_90m_id
-    int micro_id
-    string liq_ref
-    string ssmt_ref
-    string structure_ref
-    int timestamp_val
-    string status
-
-// Global Buffers
-var array<CycleSnapshot> weekly_history = array.new<CycleSnapshot>()
-var array<CycleSnapshot> daily_history = array.new<CycleSnapshot>()
-var array<CycleSnapshot> cycle_90m_history = array.new<CycleSnapshot>()
-var array<CycleSnapshot> micro_history = array.new<CycleSnapshot>()
-
-var array<LiquidityEvent> liquidity_buffer = array.new<LiquidityEvent>()
-var array<StructurePoint> structure_buffer = array.new<StructurePoint>()
-var array<SSMTSignal> ssmt_buffer = array.new<SSMTSignal>()
-var array<TradeSignal> trade_signals = array.new<TradeSignal>()
-
-// State
-var string weekly_bias = "NEUTRAL"
-var string daily_bias = "NEUTRAL"
-var string bias_90m = "NEUTRAL"
+// Input Parameters
+lookback_length = input.int(20, "Lookback Length", minval=5)
+fvg_threshold = input.float(0.5, "FVG Threshold %", minval=0.1, maxval=2.0)
+sweep_pip_buffer = input.int(10, "Sweep Buffer (pips)", minval=1)
 
 // ============================================================================
-// PHASE 4.2 - QUARTER THEORY CYCLE ENGINE
+// CORE LOGIC - Market Structure Detection
 // ============================================================================
 
-f_get_ny_hour() =>
-    // Simplified: get current hour (EST = UTC-5)
-    curr_hour = hour(time)
-    curr_hour
+// Detect Swing Highs
+detect_swing_high(len) =>
+    bar_index >= len and high < high[len] and high == ta.highest(high, len)
 
-f_get_ny_dayofweek() =>
-    curr_day = dayofweek(time)
-    curr_day
+// Detect Swing Lows  
+detect_swing_low(len) =>
+    bar_index >= len and low > low[len] and low == ta.lowest(low, len)
 
-f_get_year_week() =>
-    cy = year(time)
-    cw = weekofyear(time)
-    cy * 100 + cw
-
-f_get_year_day() =>
-    cy = year(time)
-    cd = dayofweek(time) + (month(time) * 30)
-    cy * 10000 + cd
-
-f_get_90m_id() =>
-    curr_hour = f_get_ny_hour()
-    curr_min = minute(time)
-    total_min = curr_hour * 60 + curr_min
-    block_num = math.floor(total_min / 90)
-    block_num
-
-f_get_micro_id() =>
-    curr_hour = f_get_ny_hour()
-    curr_min = minute(time)
-    total_min = curr_hour * 60 + curr_min
-    block_num = math.floor(total_min / 5)
-    block_num
-
-f_detect_bias(open_p, close_p) =>
-    if close_p > open_p
-        "BULL"
-    else if close_p < open_p
-        "BEAR"
-    else
-        "NEUTRAL"
-
-f_update_weekly() =>
-    week_id = f_get_year_week()
-    
-    if array.size(weekly_history) == 0 or weekly_history.last().cycle_id != week_id
-        snap = CycleSnapshot.new()
-        snap.cycle_id := week_id
-        snap.cycle_type := "WEEKLY"
-        snap.open_price := open[1]
-        snap.high_price := high[1]
-        snap.low_price := low[1]
-        snap.close_price := close[1]
-        snap.bias := f_detect_bias(open[1], close[1])
-        snap.timestamp_val := time[1]
-        snap.confirmed := true
-        
-        array.push(weekly_history, snap)
-        
-        if array.size(weekly_history) > 52
-            array.shift(weekly_history)
-        
-        weekly_bias := snap.bias
-
-f_update_daily() =>
-    day_id = f_get_year_day()
-    
-    if array.size(daily_history) == 0 or daily_history.last().cycle_id != day_id
-        snap = CycleSnapshot.new()
-        snap.cycle_id := day_id
-        snap.cycle_type := "DAILY"
-        snap.open_price := open[1]
-        snap.high_price := high[1]
-        snap.low_price := low[1]
-        snap.close_price := close[1]
-        snap.bias := f_detect_bias(open[1], close[1])
-        snap.timestamp_val := time[1]
-        snap.confirmed := true
-        
-        array.push(daily_history, snap)
-        
-        if array.size(daily_history) > 365
-            array.shift(daily_history)
-        
-        daily_bias := snap.bias
-
-f_update_90m() =>
-    id_90m = f_get_90m_id()
-    
-    if array.size(cycle_90m_history) == 0 or cycle_90m_history.last().cycle_id != id_90m
-        snap = CycleSnapshot.new()
-        snap.cycle_id := id_90m
-        snap.cycle_type := "90M"
-        snap.open_price := open
-        snap.high_price := high
-        snap.low_price := low
-        snap.close_price := close
-        snap.bias := f_detect_bias(open, close)
-        snap.timestamp_val := time
-        snap.confirmed := barstate.isconfirmed
-        
-        array.push(cycle_90m_history, snap)
-        
-        if array.size(cycle_90m_history) > 200
-            array.shift(cycle_90m_history)
-        
-        bias_90m := snap.bias
-
-f_update_micro() =>
-    id_micro = f_get_micro_id()
-    
-    if array.size(micro_history) == 0 or micro_history.last().cycle_id != id_micro
-        snap = CycleSnapshot.new()
-        snap.cycle_id := id_micro
-        snap.cycle_type := "MICRO"
-        snap.open_price := open
-        snap.high_price := high
-        snap.low_price := low
-        snap.close_price := close
-        snap.bias := f_detect_bias(open, close)
-        snap.timestamp_val := time
-        snap.confirmed := barstate.isconfirmed
-        
-        array.push(micro_history, snap)
-        
-        if array.size(micro_history) > 500
-            array.shift(micro_history)
-
-// ============================================================================
-// PHASE 4.3 - MARKET STRUCTURE ENGINE
-// ============================================================================
-
-f_detect_swing_high(length) =>
-    if bar_index < length
-        false
-    else
-        is_high = high < high[length]
-        for i = 1 to length - 1
-            if high < high[i]
-                is_high := false
-                break
-        is_high
-
-f_detect_swing_low(length) =>
-    if bar_index < length
-        false
-    else
-        is_low = low > low[length]
-        for i = 1 to length - 1
-            if low > low[i]
-                is_low := false
-                break
-        is_low
-
-f_update_structure() =>
-    swing_len = 3
-    
-    if f_detect_swing_high(swing_len)
-        sp = StructurePoint.new()
-        sp.price_val := high
-        sp.point_type := "SWING_HIGH"
-        sp.timestamp_val := time
-        sp.confirmed := barstate.isconfirmed
-        array.push(structure_buffer, sp)
-    
-    if f_detect_swing_low(swing_len)
-        sp = StructurePoint.new()
-        sp.price_val := low
-        sp.point_type := "SWING_LOW"
-        sp.timestamp_val := time
-        sp.confirmed := barstate.isconfirmed
-        array.push(structure_buffer, sp)
-    
-    if array.size(structure_buffer) > 200
-        array.shift(structure_buffer)
-
-f_get_last_high() =>
+// Get last swing high
+get_last_swing_high() =>
     result = 0.0
-    for i = array.size(structure_buffer) - 1 to 0 by -1
-        if structure_buffer.get(i).point_type == "SWING_HIGH"
-            result := structure_buffer.get(i).price_val
-            break
+    for i = 0 to 50
+        if bar_index >= i and high == ta.highest(high, i + 1)
+            if i > 0
+                result := high[i]
+                break
     result
 
-f_get_last_low() =>
+// Get last swing low
+get_last_swing_low() =>
     result = 0.0
-    for i = array.size(structure_buffer) - 1 to 0 by -1
-        if structure_buffer.get(i).point_type == "SWING_LOW"
-            result := structure_buffer.get(i).price_val
-            break
+    for i = 0 to 50
+        if bar_index >= i and low == ta.lowest(low, i + 1)
+            if i > 0
+                result := low[i]
+                break
     result
 
 // ============================================================================
-// PHASE 4.4 - LIQUIDITY ENGINE
+// LIQUIDITY ENGINE - Sweep Detection
 // ============================================================================
 
-f_detect_liquidity() =>
-    if array.size(structure_buffer) >= 2
-        last_high = f_get_last_high()
-        last_low = f_get_last_low()
-        
-        if last_low > 0 and low < last_low
-            liq = LiquidityEvent.new()
-            liq.price_val := last_low
-            liq.sweep_type := "SWEEP"
-            liq.timestamp_val := time
-            liq.swept := true
-            liq.reaction_price := close
-            array.push(liquidity_buffer, liq)
-        
-        if last_high > 0 and high > last_high
-            liq = LiquidityEvent.new()
-            liq.price_val := last_high
-            liq.sweep_type := "SWEEP"
-            liq.timestamp_val := time
-            liq.swept := true
-            liq.reaction_price := close
-            array.push(liquidity_buffer, liq)
-    
-    if array.size(liquidity_buffer) > 300
-        array.shift(liquidity_buffer)
+last_swing_high = ta.highest(high, lookback_length)
+last_swing_low = ta.lowest(low, lookback_length)
 
-f_get_last_sweep() =>
-    result = na(LiquidityEvent)
-    for i = array.size(liquidity_buffer) - 1 to 0 by -1
-        if liquidity_buffer.get(i).sweep_type == "SWEEP"
-            result := liquidity_buffer.get(i)
-            break
-    result
+// Detect bullish sweep (low breaks below previous swing low)
+bullish_sweep = low < last_swing_low and low[1] >= last_swing_low
+
+// Detect bearish sweep (high breaks above previous swing high)
+bearish_sweep = high > last_swing_high and high[1] <= last_swing_high
 
 // ============================================================================
-// PHASE 4.5 - SSMT ENGINE
+// SSMT ENGINE - Divergence Detection
 // ============================================================================
 
-f_detect_ssmt() =>
-    if bar_index > 20
-        if low < low[1] and volume > volume[1]
-            sig = SSMTSignal.new()
-            sig.detected := true
-            sig.divergence_type := "BULLISH"
-            sig.price_val := low
-            sig.timestamp_val := time
-            sig.confirmed := barstate.isconfirmed
-            array.push(ssmt_buffer, sig)
-        
-        if high > high[1] and volume < volume[1]
-            sig = SSMTSignal.new()
-            sig.detected := true
-            sig.divergence_type := "BEARISH"
-            sig.price_val := high
-            sig.timestamp_val := time
-            sig.confirmed := barstate.isconfirmed
-            array.push(ssmt_buffer, sig)
-    
-    if array.size(ssmt_buffer) > 150
-        array.shift(ssmt_buffer)
+// Volume-based divergence detection
+bullish_divergence = low < low[1] and volume > volume[1]
+bearish_divergence = high > high[1] and volume < volume[1]
 
-f_get_last_ssmt() =>
-    result = na(SSMTSignal)
-    for i = array.size(ssmt_buffer) - 1 to 0 by -1
-        if ssmt_buffer.get(i).confirmed
-            result := ssmt_buffer.get(i)
-            break
-    result
+// RSI for confirmation
+rsi_val = ta.rsi(close, 14)
+rsi_oversold = rsi_val < 30
+rsi_overbought = rsi_val > 70
 
 // ============================================================================
-// PHASE 4.6 - BIAS ENGINE
+// BIAS ENGINE - Multi-timeframe Context
 // ============================================================================
 
-f_get_alignment() =>
-    if daily_bias == bias_90m
-        daily_bias + "_ALIGNED"
-    else
-        "CONFLICT"
+// 5-min trend (current timeframe)
+sma_5m = ta.sma(close, 9)
+bias_5m_bull = close > sma_5m
+bias_5m_bear = close < sma_5m
+
+// Get daily bias via HTF (request higher timeframe data)
+daily_close = request.security(syminfo.tickerid, "D", close)
+daily_sma = request.security(syminfo.tickerid, "D", ta.sma(close, 20))
+bias_daily_bull = daily_close > daily_sma
+bias_daily_bear = daily_close < daily_sma
+
+// Get 4-hour bias
+h4_close = request.security(syminfo.tickerid, "240", close)
+h4_sma = request.security(syminfo.tickerid, "240", ta.sma(close, 20))
+bias_h4_bull = h4_close > h4_sma
+bias_h4_bear = h4_close < h4_sma
+
+// Alignment check
+alignment_bull = bias_daily_bull and bias_h4_bull and bias_5m_bull
+alignment_bear = bias_daily_bear and bias_h4_bear and bias_5m_bear
 
 // ============================================================================
-// PHASE 4.7 - ENTRY ENGINE
+// FAIR VALUE GAP (FVG) DETECTION
 // ============================================================================
 
-f_calculate_fvg() =>
-    fvg_t = "NONE"
-    fvg_l = 0.0
-    
-    if bar_index >= 2
-        if low[2] > high[0]
-            fvg_t := "BULLISH"
-            fvg_l := (low[2] + high[0]) / 2
-        else if high[2] < low[0]
-            fvg_t := "BEARISH"
-            fvg_l := (high[2] + low[0]) / 2
-    
-    [fvg_t, fvg_l]
+// Bullish FVG: low[2] > high[0]
+bullish_fvg = bar_index >= 2 and low[2] > high[0]
+bullish_fvg_level = (low[2] + high[0]) / 2
 
-f_generate_trades() =>
-    if array.size(cycle_90m_history) == 0 or array.size(structure_buffer) < 2 or array.size(liquidity_buffer) == 0
-        return
-    
-    alignment = f_get_alignment()
-    
-    if alignment == "CONFLICT"
-        return
-    
-    sweep = f_get_last_sweep()
-    
-    if na(sweep)
-        return
-    
-    ssmt_sig = f_get_last_ssmt()
-    
-    if not na(ssmt_sig) and ssmt_sig.confirmed
-        [fvg_type, fvg_level] = f_calculate_fvg()
-        
-        if daily_bias == "BULL" and bias_90m == "BULL"
-            if ssmt_sig.divergence_type == "BULLISH" and fvg_type == "BULLISH"
-                entry_p = fvg_level
-                stop_p = sweep.price_val - (syminfo.mintick * 10)
-                target1_p = sweep.price_val + (entry_p - stop_p) * 2
-                target2_p = sweep.price_val + (entry_p - stop_p) * 3
-                
-                trade = TradeSignal.new()
-                trade.trade_id := str.tostring(time)
-                trade.symbol := syminfo.tickerid
-                trade.direction := "LONG"
-                trade.entry_price := entry_p
-                trade.stop_loss := stop_p
-                trade.targets := array.from(target1_p, target2_p)
-                trade.grade := "A"
-                trade.weekly_id := f_get_year_week()
-                trade.daily_id := f_get_year_day()
-                trade.cycle_90m_id := f_get_90m_id()
-                trade.micro_id := f_get_micro_id()
-                trade.liq_ref := str.tostring(sweep.price_val)
-                trade.ssmt_ref := ssmt_sig.divergence_type
-                trade.structure_ref := str.tostring(fvg_level)
-                trade.timestamp_val := time
-                trade.status := "PENDING"
-                
-                array.push(trade_signals, trade)
-        
-        if daily_bias == "BEAR" and bias_90m == "BEAR"
-            if ssmt_sig.divergence_type == "BEARISH" and fvg_type == "BEARISH"
-                entry_p = fvg_level
-                stop_p = sweep.price_val + (syminfo.mintick * 10)
-                target1_p = sweep.price_val - (stop_p - entry_p) * 2
-                target2_p = sweep.price_val - (stop_p - entry_p) * 3
-                
-                trade = TradeSignal.new()
-                trade.trade_id := str.tostring(time)
-                trade.symbol := syminfo.tickerid
-                trade.direction := "SHORT"
-                trade.entry_price := entry_p
-                trade.stop_loss := stop_p
-                trade.targets := array.from(target1_p, target2_p)
-                trade.grade := "A"
-                trade.weekly_id := f_get_year_week()
-                trade.daily_id := f_get_year_day()
-                trade.cycle_90m_id := f_get_90m_id()
-                trade.micro_id := f_get_micro_id()
-                trade.liq_ref := str.tostring(sweep.price_val)
-                trade.ssmt_ref := ssmt_sig.divergence_type
-                trade.structure_ref := str.tostring(fvg_level)
-                trade.timestamp_val := time
-                trade.status := "PENDING"
-                
-                array.push(trade_signals, trade)
-    
-    if array.size(trade_signals) > 50
-        array.shift(trade_signals)
+// Bearish FVG: high[2] < low[0]
+bearish_fvg = bar_index >= 2 and high[2] < low[0]
+bearish_fvg_level = (high[2] + low[0]) / 2
 
 // ============================================================================
-// MAIN EXECUTION
+// ENTRY SIGNAL GENERATION
 // ============================================================================
 
-f_update_weekly()
-f_update_daily()
-f_update_90m()
-f_update_micro()
-f_update_structure()
-f_detect_liquidity()
-f_detect_ssmt()
-f_generate_trades()
+// LONG Setup: Bullish sweep + Bullish divergence + Alignment + FVG
+long_signal = bullish_sweep and bullish_divergence and alignment_bull and bullish_fvg and rsi_oversold
+
+// SHORT Setup: Bearish sweep + Bearish divergence + Alignment + FVG
+short_signal = bearish_sweep and bearish_divergence and alignment_bear and bearish_fvg and rsi_overbought
+
+// ============================================================================
+// RISK MANAGEMENT
+// ============================================================================
+
+// LONG Risk Management
+long_entry = long_signal ? close : na
+long_stop = long_signal ? last_swing_low - (syminfo.mintick * sweep_pip_buffer) : na
+long_risk = long_entry - long_stop
+long_target_1 = long_signal ? long_entry + (long_risk * 2) : na
+long_target_2 = long_signal ? long_entry + (long_risk * 3) : na
+
+// SHORT Risk Management
+short_entry = short_signal ? close : na
+short_stop = short_signal ? last_swing_high + (syminfo.mintick * sweep_pip_buffer) : na
+short_risk = short_stop - short_entry
+short_target_1 = short_signal ? short_entry - (short_risk * 2) : na
+short_target_2 = short_signal ? short_entry - (short_risk * 3) : na
 
 // ============================================================================
 // VISUALIZATION
 // ============================================================================
 
-plot_y = close + (high - low) * 2
-color_w = weekly_bias == "BULL" ? color.new(color.green, 80) : weekly_bias == "BEAR" ? color.new(color.red, 80) : color.new(color.gray, 80)
-plot(plot_y, title="Weekly Bias", color=color_w, linewidth=3, display=display.none)
+// Plot swing points
+plot(ta.highest(high, lookback_length), "Swing High", color=color.new(color.red, 70), linewidth=2)
+plot(ta.lowest(low, lookback_length), "Swing Low", color=color.new(color.green, 70), linewidth=2)
 
-sweep = f_get_last_sweep()
-if not na(sweep)
-    line.new(bar_index - 50, sweep.price_val, bar_index, sweep.price_val, color=color.orange, width=2, style=line.style_dashed)
+// Plot FVG levels
+plot(bullish_fvg ? bullish_fvg_level : na, "Bullish FVG", color=color.new(color.lime, 50), linewidth=1, style=plot.style_line)
+plot(bearish_fvg ? bearish_fvg_level : na, "Bearish FVG", color=color.new(color.red, 50), linewidth=1, style=plot.style_line)
 
-sig = f_get_last_ssmt()
-if not na(sig) and sig.confirmed
-    marker_col = sig.divergence_type == "BULLISH" ? color.lime : color.fuchsia
-    plot(sig.price_val, title="SSMT Signal", color=marker_col, style=plot.style_circles, linewidth=3)
+// Plot entry signals
+plotshape(long_signal, "LONG Signal", shape.labelup, location.belowbar, color=color.new(color.green, 0), size=size.large)
+plotshape(short_signal, "SHORT Signal", shape.labeldown, location.abovebar, color=color.new(color.red, 0), size=size.large)
 
-if array.size(trade_signals) > 0
-    latest = trade_signals.last()
-    if latest.status == "PENDING"
-        line.new(bar_index - 20, latest.entry_price, bar_index, latest.entry_price, color=color.blue, width=2)
-        line.new(bar_index - 20, latest.stop_loss, bar_index, latest.stop_loss, color=color.red, width=2, style=line.style_dotted)
-        line.new(bar_index - 20, latest.targets.get(0), bar_index, latest.targets.get(0), color=color.green, width=2, style=line.style_dashed)
+// Plot entry, stop, target levels
+plot(long_entry, "Long Entry", color=color.blue, linewidth=2, style=plot.style_circles)
+plot(long_stop, "Long Stop", color=color.new(color.red, 0), linewidth=1, style=plot.style_dashed)
+plot(long_target_1, "Long Target 1", color=color.new(color.green, 0), linewidth=1, style=plot.style_dashed)
+plot(long_target_2, "Long Target 2", color=color.new(color.green, 0), linewidth=1, style=plot.style_dashed)
+
+plot(short_entry, "Short Entry", color=color.blue, linewidth=2, style=plot.style_circles)
+plot(short_stop, "Short Stop", color=color.new(color.red, 0), linewidth=1, style=plot.style_dashed)
+plot(short_target_1, "Short Target 1", color=color.new(color.green, 0), linewidth=1, style=plot.style_dashed)
+plot(short_target_2, "Short Target 2", color=color.new(color.green, 0), linewidth=1, style=plot.style_dashed)
+
+// Plot bias colors
+bgcolor(alignment_bull ? color.new(color.green, 85) : alignment_bear ? color.new(color.red, 85) : color.new(color.gray, 95))
 
 // ============================================================================
 // DIAGNOSTICS TABLE
 // ============================================================================
 
-var table diag = na
+var table info_table = na
 
 if barstate.islast
-    if na(diag)
-        diag := table.new(position=position.top_right, columns=2, rows=8, bgcolor=color.new(color.black, 80), border_color=color.gray, border_width=1)
+    if na(info_table)
+        info_table := table.new(position=position.top_right, columns=2, rows=10, bgcolor=color.new(color.black, 80), border_color=color.gray, border_width=1)
         
-        table.cell(diag, 0, 0, "WEEKLY BIAS", text_color=color.white)
-        table.cell(diag, 1, 0, weekly_bias, text_color=color.white)
-        
-        table.cell(diag, 0, 1, "DAILY BIAS", text_color=color.white)
-        table.cell(diag, 1, 1, daily_bias, text_color=color.white)
-        
-        table.cell(diag, 0, 2, "90M BIAS", text_color=color.white)
-        table.cell(diag, 1, 2, bias_90m, text_color=color.white)
-        
-        table.cell(diag, 0, 3, "ALIGNMENT", text_color=color.white)
-        table.cell(diag, 1, 3, f_get_alignment(), text_color=color.white)
-        
-        table.cell(diag, 0, 4, "SWEEPS", text_color=color.white)
-        table.cell(diag, 1, 4, str.tostring(array.size(liquidity_buffer)), text_color=color.white)
-        
-        table.cell(diag, 0, 5, "SSMT SIGNALS", text_color=color.white)
-        table.cell(diag, 1, 5, str.tostring(array.size(ssmt_buffer)), text_color=color.white)
-        
-        table.cell(diag, 0, 6, "TRADES", text_color=color.white)
-        table.cell(diag, 1, 6, str.tostring(array.size(trade_signals)), text_color=color.white)
-        
-        table.cell(diag, 0, 7, "STATUS", text_color=color.white)
-        if array.size(trade_signals) > 0
-            latest = trade_signals.last()
-            table.cell(diag, 1, 7, latest.status + " | " + latest.direction, text_color=color.white)
-        else
-            table.cell(diag, 1, 7, "AWAITING SETUP", text_color=color.white)
+    // Bias info
+    daily_bias_text = bias_daily_bull ? "BULL" : bias_daily_bear ? "BEAR" : "NEUTRAL"
+    h4_bias_text = bias_h4_bull ? "BULL" : bias_h4_bear ? "BEAR" : "NEUTRAL"
+    m5_bias_text = bias_5m_bull ? "BULL" : bias_5m_bear ? "BEAR" : "NEUTRAL"
+    alignment_text = alignment_bull ? "BULL ALIGNED" : alignment_bear ? "BEAR ALIGNED" : "CONFLICT"
+    
+    table.cell(info_table, 0, 0, "DAILY", text_color=color.white, bgcolor=color.new(color.black, 80))
+    table.cell(info_table, 1, 0, daily_bias_text, text_color=bias_daily_bull ? color.green : bias_daily_bear ? color.red : color.white)
+    
+    table.cell(info_table, 0, 1, "4H", text_color=color.white, bgcolor=color.new(color.black, 80))
+    table.cell(info_table, 1, 1, h4_bias_text, text_color=bias_h4_bull ? color.green : bias_h4_bear ? color.red : color.white)
+    
+    table.cell(info_table, 0, 2, "5M", text_color=color.white, bgcolor=color.new(color.black, 80))
+    table.cell(info_table, 1, 2, m5_bias_text, text_color=bias_5m_bull ? color.green : bias_5m_bear ? color.red : color.white)
+    
+    table.cell(info_table, 0, 3, "ALIGNMENT", text_color=color.white, bgcolor=color.new(color.black, 80))
+    table.cell(info_table, 1, 3, alignment_text, text_color=alignment_bull ? color.green : alignment_bear ? color.red : color.orange)
+    
+    table.cell(info_table, 0, 4, "RSI", text_color=color.white, bgcolor=color.new(color.black, 80))
+    table.cell(info_table, 1, 4, str.tostring(math.round(rsi_val, 2)), text_color=rsi_oversold ? color.lime : rsi_overbought ? color.red : color.white)
+    
+    table.cell(info_table, 0, 5, "SWEEP BULL", text_color=color.white, bgcolor=color.new(color.black, 80))
+    table.cell(info_table, 1, 5, bullish_sweep ? "YES" : "NO", text_color=bullish_sweep ? color.lime : color.white)
+    
+    table.cell(info_table, 0, 6, "SWEEP BEAR", text_color=color.white, bgcolor=color.new(color.black, 80))
+    table.cell(info_table, 1, 6, bearish_sweep ? "YES" : "NO", text_color=bearish_sweep ? color.red : color.white)
+    
+    table.cell(info_table, 0, 7, "FVG BULL", text_color=color.white, bgcolor=color.new(color.black, 80))
+    table.cell(info_table, 1, 7, bullish_fvg ? "YES" : "NO", text_color=bullish_fvg ? color.lime : color.white)
+    
+    table.cell(info_table, 0, 8, "FVG BEAR", text_color=color.white, bgcolor=color.new(color.black, 80))
+    table.cell(info_table, 1, 8, bearish_fvg ? "YES" : "NO", text_color=bearish_fvg ? color.red : color.white)
+    
+    table.cell(info_table, 0, 9, "STATUS", text_color=color.white, bgcolor=color.new(color.black, 80))
+    status_text = long_signal ? "LONG SIGNAL" : short_signal ? "SHORT SIGNAL" : "AWAITING SETUP"
+    table.cell(info_table, 1, 9, status_text, text_color=long_signal ? color.green : short_signal ? color.red : color.white)
