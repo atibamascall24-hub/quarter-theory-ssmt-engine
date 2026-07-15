@@ -1,0 +1,215 @@
+//@version=6
+indicator("Quarter Theory - 90M Cycles", overlay=true, max_lines_count=500, max_boxes_count=500)
+
+// ============================================================================
+// QUARTER THEORY - 90 MINUTE CYCLES
+// Foundation: Plot previous quarter's High and Low
+// New York Timezone
+// No Repainting
+// ============================================================================
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+
+show_current_quarter = input.bool(true, "Show Current Quarter H/L")
+show_previous_quarter = input.bool(true, "Show Previous Quarter H/L")
+current_q_color = input.color(color.new(color.blue, 70), "Current Quarter Color")
+previous_q_color = input.color(color.new(color.orange, 70), "Previous Quarter Color")
+line_width = input.int(2, "Line Width", minval=1, maxval=5)
+extend_lines = input.bool(true, "Extend Lines Right")
+
+// ============================================================================
+// CORE LOGIC - NY TIME & 90M CYCLE CALCULATION
+// ============================================================================
+
+// Get current time in NY timezone (EST = UTC-5, EDT = UTC-4)
+// For simplicity, we'll use the chart's bar time and assume NY timezone
+// In production, you'd need to convert properly based on DST
+
+f_get_ny_time() =>
+    // Returns time in milliseconds (NY time assumed from chart)
+    time
+
+f_get_minutes_since_midnight() =>
+    // Get hour and minute of current bar
+    bar_hour = hour(time)
+    bar_minute = minute(time)
+    
+    // Minutes since midnight
+    minutes_since_midnight = bar_hour * 60 + bar_minute
+    minutes_since_midnight
+
+f_get_90m_quarter_number() =>
+    // Which 90-minute quarter are we in?
+    // Quarter 1: 0:00 - 1:29 (minutes 0-89)
+    // Quarter 2: 1:30 - 2:59 (minutes 90-179)
+    // Quarter 3: 3:00 - 4:29 (minutes 180-269)
+    // etc.
+    
+    minutes = f_get_minutes_since_midnight()
+    quarter = math.floor(minutes / 90)
+    quarter
+
+f_get_90m_cycle_id() =>
+    // Unique ID: YYYYMMDD + quarter number
+    cycle_date = year(time) * 10000 + month(time) * 100 + dayofmonth(time)
+    quarter_num = f_get_90m_quarter_number()
+    cycle_id = cycle_date * 100 + quarter_num
+    cycle_id
+
+f_is_new_90m_quarter() =>
+    // Check if we just entered a new 90-minute quarter
+    current_id = f_get_90m_cycle_id()
+    previous_id = f_get_90m_cycle_id()[1]
+    
+    current_id != previous_id
+
+// ============================================================================
+// QUARTER STATE TRACKING
+// ============================================================================
+
+// Store current and previous quarter data
+var int current_quarter_id = 0
+var float current_quarter_high = 0.0
+var float current_quarter_low = 0.0
+
+var int previous_quarter_id = 0
+var float previous_quarter_high = 0.0
+var float previous_quarter_low = 0.0
+
+var array<line> active_lines = array.new<line>()
+
+// ============================================================================
+// MAIN LOGIC - UPDATE QUARTERS
+// ============================================================================
+
+if f_is_new_90m_quarter()
+    // Store current quarter as previous
+    previous_quarter_id := current_quarter_id
+    previous_quarter_high := current_quarter_high
+    previous_quarter_low := current_quarter_low
+    
+    // Start new current quarter
+    current_quarter_id := f_get_90m_cycle_id()
+    current_quarter_high := high
+    current_quarter_low := low
+
+// Update current quarter high/low if we're still in same quarter
+if f_get_90m_cycle_id() == current_quarter_id
+    current_quarter_high := math.max(current_quarter_high, high)
+    current_quarter_low := math.min(current_quarter_low, low)
+
+// ============================================================================
+// VISUALIZATION - PLOT LINES
+// ============================================================================
+
+// Plot CURRENT quarter High and Low
+if show_current_quarter and current_quarter_id != 0
+    // Current High
+    line_high_current = line.new(
+        x1=bar_index - 90,
+        y1=current_quarter_high,
+        x2=bar_index,
+        y2=current_quarter_high,
+        closed=false,
+        extend=extend_lines ? line.all : line.none,
+        color=current_q_color,
+        width=line_width,
+        style=line.style_solid
+    )
+    
+    // Current Low
+    line_low_current = line.new(
+        x1=bar_index - 90,
+        y1=current_quarter_low,
+        x2=bar_index,
+        y2=current_quarter_low,
+        closed=false,
+        extend=extend_lines ? line.all : line.none,
+        color=current_q_color,
+        width=line_width,
+        style=line.style_solid
+    )
+
+// Plot PREVIOUS quarter High and Low
+if show_previous_quarter and previous_quarter_id != 0
+    // Previous High
+    line_high_previous = line.new(
+        x1=bar_index - 180,
+        y1=previous_quarter_high,
+        x2=bar_index,
+        y2=previous_quarter_high,
+        closed=false,
+        extend=extend_lines ? line.all : line.none,
+        color=previous_q_color,
+        width=line_width,
+        style=line.style_dashed
+    )
+    
+    // Previous Low
+    line_low_previous = line.new(
+        x1=bar_index - 180,
+        y1=previous_quarter_low,
+        x2=bar_index,
+        y2=previous_quarter_low,
+        closed=false,
+        extend=extend_lines ? line.all : line.none,
+        color=previous_q_color,
+        width=line_width,
+        style=line.style_dashed
+    )
+
+// ============================================================================
+// DIAGNOSTICS TABLE
+// ============================================================================
+
+var table diag_table = na
+
+if barstate.islast
+    if na(diag_table)
+        diag_table := table.new(
+            position=position.top_left,
+            columns=2,
+            rows=10,
+            bgcolor=color.new(color.black, 80),
+            border_color=color.gray,
+            border_width=1
+        )
+    
+    // Current time info
+    bar_hour = hour(time)
+    bar_minute = minute(time)
+    minutes_in_day = f_get_minutes_since_midnight()
+    quarter_num = f_get_90m_quarter_number()
+    
+    table.cell(diag_table, 0, 0, "TIME (NY)", text_color=color.white, bgcolor=color.new(color.black, 80))
+    table.cell(diag_table, 1, 0, str.format("{0:02d}:{1:02d}", bar_hour, bar_minute), text_color=color.white)
+    
+    table.cell(diag_table, 0, 1, "MINUTES IN DAY", text_color=color.white, bgcolor=color.new(color.black, 80))
+    table.cell(diag_table, 1, 1, str.tostring(minutes_in_day), text_color=color.white)
+    
+    table.cell(diag_table, 0, 2, "90M QUARTER", text_color=color.white, bgcolor=color.new(color.black, 80))
+    table.cell(diag_table, 1, 2, str.tostring(quarter_num), text_color=color.white)
+    
+    table.cell(diag_table, 0, 3, "CYCLE ID", text_color=color.white, bgcolor=color.new(color.black, 80))
+    table.cell(diag_table, 1, 3, str.tostring(current_quarter_id), text_color=color.white)
+    
+    table.cell(diag_table, 0, 4, "CURRENT Q HIGH", text_color=color.white, bgcolor=color.new(color.black, 80))
+    table.cell(diag_table, 1, 4, str.tostring(math.round(current_quarter_high, 2)), text_color=color.lime)
+    
+    table.cell(diag_table, 0, 5, "CURRENT Q LOW", text_color=color.white, bgcolor=color.new(color.black, 80))
+    table.cell(diag_table, 1, 5, str.tostring(math.round(current_quarter_low, 2)), text_color=color.lime)
+    
+    table.cell(diag_table, 0, 6, "PREV Q HIGH", text_color=color.white, bgcolor=color.new(color.black, 80))
+    table.cell(diag_table, 1, 6, str.tostring(math.round(previous_quarter_high, 2)), text_color=color.orange)
+    
+    table.cell(diag_table, 0, 7, "PREV Q LOW", text_color=color.white, bgcolor=color.new(color.black, 80))
+    table.cell(diag_table, 1, 7, str.tostring(math.round(previous_quarter_low, 2)), text_color=color.orange)
+    
+    table.cell(diag_table, 0, 8, "NEW QUARTER", text_color=color.white, bgcolor=color.new(color.black, 80))
+    is_new = f_is_new_90m_quarter()
+    table.cell(diag_table, 1, 8, is_new ? "YES" : "NO", text_color=is_new ? color.red : color.white)
+    
+    table.cell(diag_table, 0, 9, "STATUS", text_color=color.white, bgcolor=color.new(color.black, 80))
+    table.cell(diag_table, 1, 9, "TRACKING", text_color=color.green)
