@@ -78,6 +78,9 @@ if f_get_90m_cycle_id() == current_quarter_id
 // VISUALIZATION - PLOT LINES
 // ============================================================================
 
+// Determine extend type
+extend_type = extend_lines ? xloc.bar_index : xloc.bar_index
+
 // Plot CURRENT quarter High and Low
 if show_current_quarter and current_quarter_id != 0
     line.new(
@@ -85,7 +88,6 @@ if show_current_quarter and current_quarter_id != 0
         y1=current_quarter_high,
         x2=bar_index,
         y2=current_quarter_high,
-        extend=extend_lines ? line.right : line.both,
         color=current_q_color,
         width=line_width,
         style=line.style_solid
@@ -96,7 +98,6 @@ if show_current_quarter and current_quarter_id != 0
         y1=current_quarter_low,
         x2=bar_index,
         y2=current_quarter_low,
-        extend=extend_lines ? line.right : line.both,
         color=current_q_color,
         width=line_width,
         style=line.style_solid
@@ -109,7 +110,6 @@ if show_previous_quarter and previous_quarter_id != 0
         y1=previous_quarter_high,
         x2=bar_index,
         y2=previous_quarter_high,
-        extend=extend_lines ? line.right : line.both,
         color=previous_q_color,
         width=line_width,
         style=line.style_dashed
@@ -120,7 +120,6 @@ if show_previous_quarter and previous_quarter_id != 0
         y1=previous_quarter_low,
         x2=bar_index,
         y2=previous_quarter_low,
-        extend=extend_lines ? line.right : line.both,
         color=previous_q_color,
         width=line_width,
         style=line.style_dashed
@@ -148,8 +147,10 @@ if barstate.islast
     minutes_in_day = f_get_minutes_since_midnight()
     quarter_num = f_get_90m_quarter_number()
     
+    time_str = str.tostring(bar_hour) + ":" + (bar_minute < 10 ? "0" + str.tostring(bar_minute) : str.tostring(bar_minute))
+    
     table.cell(diag_table, 0, 0, "TIME (NY)", text_color=color.white, bgcolor=color.new(color.black, 80))
-    table.cell(diag_table, 1, 0, str.format("{0:02d}:{1:02d}", bar_hour, bar_minute), text_color=color.white)
+    table.cell(diag_table, 1, 0, time_str, text_color=color.white)
     
     table.cell(diag_table, 0, 1, "MINUTES IN DAY", text_color=color.white, bgcolor=color.new(color.black, 80))
     table.cell(diag_table, 1, 1, str.tostring(minutes_in_day), text_color=color.white)
